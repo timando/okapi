@@ -22,7 +22,7 @@ pub fn get_title_and_desc_from_doc(attrs: &[Attribute]) -> (Option<String>, Opti
 }
 
 fn merge_description_lines(doc: &str) -> Option<String> {
-    let desc = doc.to_owned()
+    let desc = doc.to_owned();
     none_if_empty(desc)
 }
 
