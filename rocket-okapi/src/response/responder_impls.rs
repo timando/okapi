@@ -1,16 +1,20 @@
-use super::OpenApiResponder;
-use crate::{gen::OpenApiGenerator, util::*, OpenApiError};
+use super::OpenApiResponderInner;
+use crate::{
+    gen::OpenApiGenerator,
+    util::{
+        add_content_response, add_schema_response, ensure_status_code_exists,
+        produce_any_responses, set_content_type, set_status_code,
+    },
+};
 use okapi::openapi3::Responses;
-use rocket::response::Responder;
-use rocket_contrib::json::{Json, JsonValue}; // TODO json feature flag
+use rocket::fs::NamedFile;
+use rocket::serde::json::{Json, Value};
 use schemars::JsonSchema;
 use serde::Serialize;
-use std::fmt::Debug;
-use std::result::Result as StdResult;
 
 type Result = crate::Result<Responses>;
 
-impl<T: JsonSchema + Serialize> OpenApiResponder<'_> for Json<T> {
+impl<T: Serialize + JsonSchema + Send> OpenApiResponderInner for Json<T> {
     fn responses(gen: &mut OpenApiGenerator) -> Result {
         let mut responses = Responses::default();
         let schema = gen.json_schema::<T>();
@@ -19,7 +23,7 @@ impl<T: JsonSchema + Serialize> OpenApiResponder<'_> for Json<T> {
     }
 }
 
-impl OpenApiResponder<'_> for JsonValue {
+impl OpenApiResponderInner for Value {
     fn responses(_gen: &mut OpenApiGenerator) -> Result {
         let mut responses = Responses::default();
         let schema = schemars::schema::Schema::Bool(true);
@@ -28,7 +32,7 @@ impl OpenApiResponder<'_> for JsonValue {
     }
 }
 
-impl OpenApiResponder<'_> for String {
+impl OpenApiResponderInner for String {
     fn responses(gen: &mut OpenApiGenerator) -> Result {
         let mut responses = Responses::default();
         let schema = gen.json_schema::<String>();
@@ -37,32 +41,32 @@ impl OpenApiResponder<'_> for String {
     }
 }
 
-impl<'r> OpenApiResponder<'r> for &'r str {
+impl OpenApiResponderInner for &str {
     fn responses(gen: &mut OpenApiGenerator) -> Result {
         <String>::responses(gen)
     }
 }
 
-impl OpenApiResponder<'_> for Vec<u8> {
+impl OpenApiResponderInner for Vec<u8> {
     fn responses(_: &mut OpenApiGenerator) -> Result {
         let mut responses = Responses::default();
         add_content_response(
             &mut responses,
             200,
             "application/octet-stream",
-            Default::default(),
+            okapi::openapi3::MediaType::default(),
         )?;
         Ok(responses)
     }
 }
 
-impl<'r> OpenApiResponder<'r> for &'r [u8] {
+impl OpenApiResponderInner for &[u8] {
     fn responses(gen: &mut OpenApiGenerator) -> Result {
         <Vec<u8>>::responses(gen)
     }
 }
 
-impl OpenApiResponder<'_> for () {
+impl OpenApiResponderInner for () {
     fn responses(_: &mut OpenApiGenerator) -> Result {
         let mut responses = Responses::default();
         ensure_status_code_exists(&mut responses, 200);
@@ -70,7 +74,7 @@ impl OpenApiResponder<'_> for () {
     }
 }
 
-impl<'r, T: OpenApiResponder<'r>> OpenApiResponder<'r> for Option<T> {
+impl<T: OpenApiResponderInner> OpenApiResponderInner for Option<T> {
     fn responses(gen: &mut OpenApiGenerator) -> Result {
         let mut responses = T::responses(gen)?;
         ensure_status_code_exists(&mut responses, 404);
@@ -78,10 +82,17 @@ impl<'r, T: OpenApiResponder<'r>> OpenApiResponder<'r> for Option<T> {
     }
 }
 
+impl OpenApiResponderInner for NamedFile {
+    fn responses(gen: &mut OpenApiGenerator) -> Result {
+        <Vec<u8>>::responses(gen)
+    }
+}
+
 macro_rules! status_responder {
     ($responder: ident, $status: literal) => {
-        impl<'r, T: OpenApiResponder<'r>> OpenApiResponder<'r>
-            for rocket::response::status::$responder<T>
+        impl<T> OpenApiResponderInner for rocket::response::status::$responder<T>
+        where
+            T: OpenApiResponderInner + Send,
         {
             fn responses(gen: &mut OpenApiGenerator) -> Result {
                 let mut responses = T::responses(gen)?;
@@ -98,19 +109,10 @@ status_responder!(BadRequest, 400);
 status_responder!(Unauthorized, 401);
 status_responder!(Forbidden, 403);
 status_responder!(NotFound, 404);
-status_responder!(Conflict, 409);
-
-impl OpenApiResponder<'_> for rocket::response::status::NoContent {
-    fn responses(_: &mut OpenApiGenerator) -> Result {
-        let mut responses = Responses::default();
-        set_status_code(&mut responses, 204)?;
-        Ok(responses)
-    }
-}
 
 macro_rules! response_content_wrapper {
     ($responder: ident, $mime: literal) => {
-        impl<'r, T: OpenApiResponder<'r>> OpenApiResponder<'r>
+        impl<T: OpenApiResponderInner> OpenApiResponderInner
             for rocket::response::content::$responder<T>
         {
             fn responses(gen: &mut OpenApiGenerator) -> Result {
@@ -130,24 +132,10 @@ response_content_wrapper!(MsgPack, "application/msgpack");
 response_content_wrapper!(Plain, "text/plain");
 response_content_wrapper!(Xml, "text/xml");
 
-impl<'r, T: OpenApiResponder<'r>, E: Debug> OpenApiResponder<'r> for StdResult<T, E> {
-    default fn responses(gen: &mut OpenApiGenerator) -> Result {
-        let mut responses = T::responses(gen)?;
-        ensure_status_code_exists(&mut responses, 500);
-        Ok(responses)
-    }
-}
-
-impl<'r, T: OpenApiResponder<'r>, E: Responder<'r> + Debug> OpenApiResponder<'r>
-    for StdResult<T, E>
-{
-    default fn responses(_: &mut OpenApiGenerator) -> Result {
-        Err(OpenApiError::new("Unable to generate OpenAPI spec for Result<T, E> response, as E implements Responder but not OpenApiResponder.".to_owned()))
-    }
-}
-
-impl<'r, T: OpenApiResponder<'r>, E: OpenApiResponder<'r> + Debug> OpenApiResponder<'r>
-    for StdResult<T, E>
+impl<'r, 'o, T, E> OpenApiResponderInner for std::result::Result<T, E>
+where
+    T: OpenApiResponderInner,
+    E: OpenApiResponderInner,
 {
     fn responses(gen: &mut OpenApiGenerator) -> Result {
         let ok_responses = T::responses(gen)?;
