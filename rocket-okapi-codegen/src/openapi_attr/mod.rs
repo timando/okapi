@@ -360,6 +360,11 @@ fn create_route_operation_fn(
                     RequestHeaderInput::Parameter(p) => {
                        parameters.push(p.into());
                     }
+                    RequestHeaderInput::Parameters(p) => {
+                        for p in p.into_iter(){
+                            parameters.push(p.into());
+                        }
+                    }
                     // Add Security Schemes, different section.
                     RequestHeaderInput::Security(name, schema, requirement) => {
                         // Add/replace the security scheme (global).

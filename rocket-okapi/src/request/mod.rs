@@ -73,6 +73,8 @@ pub enum RequestHeaderInput {
     None,
     /// Useful for when you want to set a header per route.
     Parameter(Parameter),
+    /// Useful when it takes multiple parameters
+    Parameters(Vec<Parameter>),
     /// The request guard implements a security scheme.
     ///
     /// Parameters:
